@@ -45,6 +45,25 @@ func (d *ILanZou) GetAddition() driver.Additional {
 	return &d.Addition
 }
 
+// defaultUserAgent is the UA this driver sent before upstream #1722 merged the
+// per-driver user agents into base.UserAgent (which advertises "OpenList/<ver>").
+const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0"
+
+// applyUserAgent overrides the shared OpenList UA on every client this driver
+// uses. An empty addition field keeps the browser fingerprint; an explicit value
+// is sent verbatim, so the fingerprint can be adjusted from the panel without
+// rebuilding the binary.
+func (d *ILanZou) applyUserAgent() {
+	ua := d.UserAgent
+	if ua == "" {
+		ua = defaultUserAgent
+	}
+	log.Debugf("[ilanzou] using user-agent: %s", ua)
+	for _, c := range []*resty.Client{d.apiClient, d.linkClient, d.upClient} {
+		c.SetHeader("User-Agent", ua)
+	}
+}
+
 func (d *ILanZou) Init(ctx context.Context) error {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -59,6 +78,7 @@ func (d *ILanZou) Init(ctx context.Context) error {
 		}),
 	)
 	d.upClient = base.NewRestyClient().SetTimeout(time.Minute * 10)
+	d.applyUserAgent()
 	if d.UUID == "" {
 		res, err := d.unproved("/getUuid", http.MethodGet, nil)
 		if err != nil {

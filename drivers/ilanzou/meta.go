@@ -10,6 +10,10 @@ type Addition struct {
 	Username string `json:"username" type:"string" required:"true"`
 	Password string `json:"password" type:"string" required:"true"`
 	Ip       string `json:"ip" type:"string"`
+	// UserAgent decides the request fingerprint this driver sends.
+	// Empty keeps the pre-#1722 browser UA; any explicit value is used verbatim,
+	// so the fingerprint can be changed from the panel without a rebuild.
+	UserAgent string `json:"user_agent" type:"string" help:"Empty = built-in browser UA. Any other value is sent verbatim."`
 
 	Token string
 	UUID  string
