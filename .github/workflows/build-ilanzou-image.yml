@@ -1,0 +1,202 @@
+name: Build ILanzou image
+
+# 手动触发：Actions -> Build ILanzou image -> Run workflow
+# 产物：ghcr.io/<owner>/openlist-ilanzoufix:<version>（可选 Docker Hub / 离线 tar.gz / 裸二进制）
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (must contain the ILanzou patch)'
+        required: true
+        default: 'ilanzou-fix'
+      version:
+        description: 'Version string baked into the binary and used as the image tag'
+        required: true
+        default: 'v4.2.6-ilanzou1'
+      platforms:
+        description: 'Build target(s)'
+        required: true
+        type: choice
+        default: 'linux/amd64'
+        options:
+          - 'linux/amd64'
+          - 'linux/arm64'
+          - 'linux/amd64,linux/arm64'
+      push_ghcr:
+        description: 'Push to GHCR (ghcr.io/<owner>/<repo>) - needs no extra secrets'
+        type: boolean
+        default: true
+      push_dockerhub:
+        description: 'Push to Docker Hub - needs DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets'
+        type: boolean
+        default: false
+      export_image_tar:
+        description: 'Also export a docker-loadable image tar.gz artifact (single-arch only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: openlist-ilanzoufix
+
+jobs:
+  # 先把驱动层的单测跑掉：UA 行为被改坏时不要产出镜像
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Verify the ILanzou UA patch is present
+        run: |
+          grep -q 'func (d \*ILanZou) applyUserAgent' drivers/ilanzou/driver.go \
+            || { echo "::error::ref '${{ inputs.ref }}' 不含 ILanzou UA 补丁，拒绝构建"; exit 1; }
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+      - name: Unit tests (ilanzou)
+        run: go test ./drivers/ilanzou/... -v
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Verify the ILanzou UA patch is present
+        run: |
+          grep -q 'func (d \*ILanZou) applyUserAgent' drivers/ilanzou/driver.go \
+            || { echo "::error::ref '${{ inputs.ref }}' 不含 ILanzou UA 补丁，拒绝构建"; exit 1; }
+
+      - name: Compose image tags
+        id: tags
+        env:
+          VERSION: ${{ inputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          PUSH_GHCR: ${{ inputs.push_ghcr }}
+          PUSH_DH: ${{ inputs.push_dockerhub }}
+        run: |
+          set -e
+          GHCR_TAGS=""
+          DH_TAGS=""
+          if [ "$PUSH_GHCR" = "true" ]; then
+            GHCR_TAGS="ghcr.io/$OWNER/$IMAGE_NAME:$VERSION
+          ghcr.io/$OWNER/$IMAGE_NAME:latest"
+          fi
+          if [ "$PUSH_DH" = "true" ]; then
+            if [ -z "$DH_USER" ]; then
+              echo "::error::push_dockerhub=true 但缺少 DOCKERHUB_USERNAME secret"
+              exit 1
+            fi
+            DH_TAGS="$DH_USER/$IMAGE_NAME:$VERSION
+          $DH_USER/$IMAGE_NAME:latest"
+          fi
+          if [ -z "$GHCR_TAGS$DH_TAGS" ]; then
+            echo "两个 registry 都没选，只做本地构建（不会 push）"
+            printf 'tags=%s\n' "openlist-ilanzoufix:$VERSION" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo 'tags<<TAGS_EOF'
+              [ -n "$GHCR_TAGS" ] && echo "$GHCR_TAGS"
+              [ -n "$DH_TAGS" ] && echo "$DH_TAGS"
+              echo 'TAGS_EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push_ghcr }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: ${{ inputs.push_dockerhub }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push_ghcr || inputs.push_dockerhub }}
+          build-args: |
+            VERSION=${{ inputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 离线兜底：单架构时导出一份 docker load 就能用的镜像包
+      - name: Export image tar (single-arch only)
+        if: ${{ inputs.export_image_tar && !contains(inputs.platforms, ',') }}
+        run: |
+          set -e
+          docker buildx build --load \
+            --platform '${{ inputs.platforms }}' \
+            --build-arg VERSION='${{ inputs.version }}' \
+            -t "openlist-ilanzoufix:${{ inputs.version }}" .
+          docker save "openlist-ilanzoufix:${{ inputs.version }}" | gzip -9 > openlist-ilanzoufix-${{ inputs.version }}.tar.gz
+          ls -lh openlist-ilanzoufix-${{ inputs.version }}.tar.gz
+
+      - name: Upload image tar
+        if: ${{ inputs.export_image_tar && !contains(inputs.platforms, ',') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tar-${{ inputs.version }}
+          path: openlist-ilanzoufix-${{ inputs.version }}.tar.gz
+          retention-days: 14
+
+  # 裸二进制兜底：不方便拉镜像时，可以把 bin/openlist 挂进官方镜像
+  binary:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64, platform: linux/amd64 }
+          - { goarch: arm64, platform: linux/arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Verify the ILanzou UA patch is present
+        run: |
+          grep -q 'func (d \*ILanZou) applyUserAgent' drivers/ilanzou/driver.go \
+            || { echo "::error::ref '${{ inputs.ref }}' 不含 ILanzou UA 补丁，拒绝构建"; exit 1; }
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+      - name: Build binary
+        env:
+          VERSION: ${{ inputs.version }}
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -e
+          bash build.sh release docker
+          file bin/openlist
+          ./bin/openlist version
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: openlist-${{ matrix.goarch }}-${{ inputs.version }}
+          path: bin/openlist
+          retention-days: 14
