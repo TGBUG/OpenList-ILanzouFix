@@ -84,31 +84,31 @@ jobs:
           PUSH_DH: ${{ inputs.push_dockerhub }}
         run: |
           set -e
-          GHCR_TAGS=""
-          DH_TAGS=""
-          if [ "$PUSH_GHCR" = "true" ]; then
-            GHCR_TAGS="ghcr.io/$OWNER/$IMAGE_NAME:$VERSION
-          ghcr.io/$OWNER/$IMAGE_NAME:latest"
-          fi
-          if [ "$PUSH_DH" = "true" ]; then
-            if [ -z "$DH_USER" ]; then
-              echo "::error::push_dockerhub=true 但缺少 DOCKERHUB_USERNAME secret"
-              exit 1
+          TAGS="$(
+            if [ "$PUSH_GHCR" = "true" ]; then
+              printf 'ghcr.io/%s/%s:%s\n' "$OWNER" "$IMAGE_NAME" "$VERSION"
+              printf 'ghcr.io/%s/%s:latest\n' "$OWNER" "$IMAGE_NAME"
             fi
-            DH_TAGS="$DH_USER/$IMAGE_NAME:$VERSION
-          $DH_USER/$IMAGE_NAME:latest"
-          fi
-          if [ -z "$GHCR_TAGS$DH_TAGS" ]; then
+            if [ "$PUSH_DH" = "true" ]; then
+              if [ -z "$DH_USER" ]; then
+                echo "::error::push_dockerhub=true 但缺少 DOCKERHUB_USERNAME secret" >&2
+                exit 1
+              fi
+              printf '%s/%s:%s\n' "$DH_USER" "$IMAGE_NAME" "$VERSION"
+              printf '%s/%s:latest\n' "$DH_USER" "$IMAGE_NAME"
+            fi
+          )"
+          if [ -z "$TAGS" ]; then
             echo "两个 registry 都没选，只做本地构建（不会 push）"
-            printf 'tags=%s\n' "openlist-ilanzoufix:$VERSION" >> "$GITHUB_OUTPUT"
-          else
-            {
-              echo 'tags<<TAGS_EOF'
-              [ -n "$GHCR_TAGS" ] && echo "$GHCR_TAGS"
-              [ -n "$DH_TAGS" ] && echo "$DH_TAGS"
-              echo 'TAGS_EOF'
-            } >> "$GITHUB_OUTPUT"
+            TAGS="openlist-ilanzoufix:$VERSION"
           fi
+          echo "将使用以下 tag："
+          printf '%s\n' "$TAGS"
+          {
+            echo 'tags<<TAGS_EOF'
+            printf '%s\n' "$TAGS"
+            echo 'TAGS_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
