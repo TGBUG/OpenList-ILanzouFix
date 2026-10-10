@@ -84,10 +84,12 @@ jobs:
           PUSH_DH: ${{ inputs.push_dockerhub }}
         run: |
           set -e
+          # GHCR 的仓库名必须全小写，owner 可能是 TGBUG 这样的大写
+          OWNER_LC="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
           TAGS="$(
             if [ "$PUSH_GHCR" = "true" ]; then
-              printf 'ghcr.io/%s/%s:%s\n' "$OWNER" "$IMAGE_NAME" "$VERSION"
-              printf 'ghcr.io/%s/%s:latest\n' "$OWNER" "$IMAGE_NAME"
+              printf 'ghcr.io/%s/%s:%s\n' "$OWNER_LC" "$IMAGE_NAME" "$VERSION"
+              printf 'ghcr.io/%s/%s:latest\n' "$OWNER_LC" "$IMAGE_NAME"
             fi
             if [ "$PUSH_DH" = "true" ]; then
               if [ -z "$DH_USER" ]; then
@@ -193,7 +195,12 @@ jobs:
           set -e
           bash build.sh release docker
           file bin/openlist
-          ./bin/openlist version
+          # 交叉编译产物不能在 amd64 runner 上执行（arm64 会 Exec format error）
+          if [ "$GOARCH" = "$(go env GOHOSTARCH)" ]; then
+            ./bin/openlist version
+          else
+            echo "cross-compiled for $GOARCH, skip running the binary on this runner"
+          fi
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
